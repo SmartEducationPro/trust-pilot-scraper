@@ -2,14 +2,13 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
-	"strconv"
 	"strings"
-	"sync"
 
 	"github.com/PuerkitoBio/goquery"
 )
@@ -17,6 +16,10 @@ import (
 const (
 	scrapingURL     = "https://www.trustpilot.com/review/%s"
 	scrapingPageURL = "https://www.trustpilot.com/review/%s?page=%d"
+)
+
+var (
+	ErrPageNotFound = errors.New("page not found")
 )
 
 type Review struct {
@@ -84,66 +87,55 @@ func main() {
 func getProductReviews(productName string, reviews chan<- *Review, done chan<- struct{}) {
 	defer close(reviews)
 
-	lastPage := 1
-	var err error
-	if lastPage, err = getPageProductReviews(productName, lastPage, reviews); err != nil {
-		done <- struct{}{}
-		return
-	}
-
-	// Get all reviews from all pages
-	wg := sync.WaitGroup{}
-	for i := 2; i <= lastPage; i++ {
-		wg.Add(1)
-		go func(pageNumber int) {
-			defer wg.Done()
-			if _, err := getPageProductReviews(productName, pageNumber, reviews); err != nil {
-				done <- struct{}{}
-				return
+	pageNumber := 0
+	for {
+		pageNumber++
+		if err := getPageProductReviews(productName, pageNumber, reviews); err != nil {
+			if err == ErrPageNotFound {
+				log.Printf("reached last page %d\n", pageNumber)
 			}
-		}(i)
+			
+			done <- struct{}{}
+			break
+		}
 	}
-
-	wg.Wait()
 }
 
-func getPageProductReviews(productName string, pageNumber int, reviews chan<- *Review) (int, error) {
+func getPageProductReviews(productName string, pageNumber int, reviews chan<- *Review) error {
 	productURL := fmt.Sprintf(scrapingPageURL, productName, pageNumber)
 	log.Println("Scraping page", pageNumber, "of", productURL)
 
 	res, err := http.Get(productURL)
 	if err != nil {
-		return pageNumber, err
+		return err
+	}
+
+	if res.StatusCode != 200 {
+		return ErrPageNotFound
 	}
 
 	defer res.Body.Close()
 
 	doc, err := goquery.NewDocumentFromReader(res.Body)
 	if err != nil {
-		return pageNumber, err
+		return err
 	}
 
-	doc.Find("article > div[class^='styles_reviewCardInner__']").Each(extractReviewFunc(reviews, productURL))
+	doc.Find("div[class^='styles_cardWrapper__']:has(article)").Each(extractReviewFunc(reviews, productURL))
 
-	if pageNumber == 1 {
-		pn := doc.Find("nav a[name='pagination-button-next']").Prev().Find("span").Text()
-
-		updatedLastPage, err := strconv.Atoi(pn)
-		if err != nil {
-			log.Println("Could not find last page", err)
-			return pageNumber, err
-		}
-
-		log.Println("Last page is", updatedLastPage)
-		return updatedLastPage, err
-	}
-
-	return pageNumber, nil
+	return nil
 }
 
 func extractReviewFunc(reviews chan<- *Review, productURL string) func(i int, s *goquery.Selection) {
 	return func(i int, s *goquery.Selection) {
-		reviewerName := s.Find("aside[class^='styles_consumerInfoWrapper__'] a[name='consumer-profile'] > span[class^='typography_heading-xxs']").First().Text()
+		reviewerName := s.Find("aside[class^='styles_consumerInfoWrapper__'] a[name='consumer-profile'] > span[class^='typography_heading']").First().Text()
+
+		createdAtTime := ""
+		ok := false
+
+		if createdAtTime, ok = s.Find("time").First().Attr("datetime"); !ok {
+			log.Println("Could not find createdAtTime", reviewerName)
+		}
 
 		// narrow the serch to the review content section
 		s = s.Find("section[class^='styles_reviewContentwrapper__']")
@@ -151,11 +143,6 @@ func extractReviewFunc(reviews chan<- *Review, productURL string) func(i int, s 
 		rating, ok := s.Find("div[class^='styles_reviewHeader__']").First().Attr("data-service-review-rating")
 		if !ok {
 			log.Println("Could not find rating", reviewerName)
-		}
-
-		createdAtTime := ""
-		if createdAtTime, ok = s.Find("time").First().Attr("datetime"); !ok {
-			log.Println("Could not find createdAtTime", reviewerName)
 		}
 
 		linkToReview := ""
