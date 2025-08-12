@@ -15,7 +15,7 @@ import (
 
 const (
 	scrapingURL     = "https://www.trustpilot.com/review/%s"
-	scrapingPageURL = "https://www.trustpilot.com/review/%s?page=%d"
+	scrapingPageURL = "https://www.trustpilot.com/review/%s?languages=all&page=%d"
 )
 
 var (
@@ -94,7 +94,7 @@ func getProductReviews(productName string, reviews chan<- *Review, done chan<- s
 			if err == ErrPageNotFound {
 				log.Printf("reached last page %d\n", pageNumber)
 			}
-			
+
 			done <- struct{}{}
 			break
 		}
@@ -152,7 +152,7 @@ func extractReviewFunc(reviews chan<- *Review, productURL string) func(i int, s 
 			linkToReview = productURL + linkToReview
 		}
 
-		reviewContent := s.Find("div[class^='styles_reviewContent__'] p[class^='typography_body-']").First()
+		reviewContent := s.Find("div[class^='styles_reviewContent__'] p[data-service-review-text-typography='true']").First()
 
 		reviewContent.RemoveAttr("class")
 		htmlContent := reviewContent.Text()
